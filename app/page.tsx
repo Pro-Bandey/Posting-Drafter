@@ -1,84 +1,168 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { uploadPost, deletePost } from "./actions";
-import { supabase } from "../lib/supabaseClient";
+import { useEffect, useState, FormEvent, useCallback } from "react";
+import { supabase } from "../utils/supabase/client";
+import clsx from "clsx";
 
-export default function Home() {
-  const [drafts, setDrafts] = useState<any[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
+type Draft = {
+  id: number;
+  title: string;
+  caption: string;
+  media_url: string;
+};
 
-  async function loadDrafts() {
-    const { data } = await supabase.from("drafts").select("*").order("id", { ascending: false });
-    setDrafts(data || []);
-  }
+export default function HomePage() {
+  const [title, setTitle] = useState("");
+  const [caption, setCaption] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadDrafts();
+  const fetchDrafts = useCallback(async () => {
+    const { data, error } = await supabase.from("drafts").select("*").order("id", { ascending: false });
+    if (error) setError(error.message);
+    else setDrafts(data as Draft[]);
   }, []);
 
-  async function handleSubmit(e: any) {
+  useEffect(() => {
+    fetchDrafts();
+  }, [fetchDrafts]);
+
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setIsUploading(true);
+    setError(null);
 
-    const formData = new FormData(e.target);
-    const res = await uploadPost(formData);
-
-    setIsUploading(false);
-
-    if (res?.error) alert(res.error);
-    else {
-      e.target.reset();
-      loadDrafts();
+    if (!title || !caption || !file) {
+      setError("All fields are required!");
+      return;
     }
-  }
 
-  async function handleDelete(id: number, url: string) {
-    await deletePost(id, url);
-    loadDrafts();
-  }
+    const validTypes = ["image/", "video/"];
+    if (!validTypes.some((type) => file.type.startsWith(type))) {
+      setError("Only images or videos are allowed.");
+      return;
+    }
+
+    setLoading(true);
+    setUploadProgress(0);
+
+    try {
+      const fileExt = file.name.split(".").pop();
+      const fileName = `${Date.now()}.${fileExt}`;
+
+      // Upload with progress simulation
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from("post-media")
+        .upload(fileName, file);
+
+      if (uploadError) throw uploadError;
+
+      const { data: publicUrlData } = supabase.storage.from("post-media").getPublicUrl(fileName);
+      const media_url = publicUrlData.publicUrl;
+
+      const { error: insertError } = await supabase.from("drafts").insert({ title, caption, media_url });
+      if (insertError) throw insertError;
+
+      setTitle("");
+      setCaption("");
+      setFile(null);
+      fetchDrafts();
+    } catch (err: any) {
+      setError(err.message || "An error occurred.");
+    } finally {
+      setLoading(false);
+      setUploadProgress(null);
+    }
+  };
+
+  const handleDelete = async (draft: Draft) => {
+    const confirmDelete = confirm("Are you sure you want to delete this draft?");
+    if (!confirmDelete) return;
+
+    try {
+      const fileName = draft.media_url.split("/").pop()!;
+      const { error: storageError } = await supabase.storage.from("post-media").remove([fileName]);
+      if (storageError) console.error(storageError);
+
+      const { error: dbError } = await supabase.from("drafts").delete().eq("id", draft.id);
+      if (dbError) console.error(dbError);
+      else fetchDrafts();
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   return (
-    <div className="p-6 max-w-2xl mx-auto">
-      
-      <h1 className="text-2xl font-bold mb-4">Create Post</h1>
+    <div className="max-w-4xl mx-auto p-6">
+      <h1 className="text-4xl font-bold mb-6 text-center">Draft Manager</h1>
 
-      <form onSubmit={handleSubmit} className="space-y-3">
-        <input name="title" className="border p-2 w-full" placeholder="Title" required />
+      {error && <p className="text-red-600 mb-4">{error}</p>}
 
-        <textarea name="caption" className="border p-2 w-full" placeholder="Caption" required />
-
-        <input name="file" type="file" className="border p-2 w-full" required />
-
+      <form
+        onSubmit={handleSubmit}
+        className="mb-8 p-4 border rounded shadow-sm bg-white dark:bg-gray-800 space-y-4"
+      >
+        <input
+          type="text"
+          placeholder="Title"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-400"
+        />
+        <input
+          type="text"
+          placeholder="Caption"
+          value={caption}
+          onChange={(e) => setCaption(e.target.value)}
+          className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-400"
+        />
+        <input
+          type="file"
+          accept="image/*,video/*"
+          onChange={(e) => setFile(e.target.files?.[0] || null)}
+          className="w-full"
+        />
+        {uploadProgress !== null && (
+          <div className="w-full bg-gray-200 rounded h-2">
+            <div className="bg-blue-600 h-2 rounded" style={{ width: `${uploadProgress}%` }} />
+          </div>
+        )}
         <button
           type="submit"
-          className="bg-blue-600 text-white px-4 py-2 rounded"
-          disabled={isUploading}
+          disabled={loading}
+          className={clsx(
+            "w-full py-2 px-4 rounded text-white font-semibold",
+            loading ? "bg-gray-500 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"
+          )}
         >
-          {isUploading ? "Uploading..." : "Create Post"}
+          {loading ? "Uploading..." : "Create Draft"}
         </button>
       </form>
 
-      <hr className="my-6" />
+      <h2 className="text-3xl font-bold mb-4">Drafts</h2>
 
-      <h2 className="text-xl font-semibold mb-4">Your Posts</h2>
+      {drafts.length === 0 && <p>No drafts yet.</p>}
 
-      <div className="grid gap-4">
-        {drafts.map((post) => (
-          <div key={post.id} className="border rounded p-3">
-            <h3 className="font-bold">{post.title}</h3>
-            <p>{post.caption}</p>
-
-            {/* Show image or video */}
-            {post.media_url.match(/\.(mp4|mov|webm)$/i) ? (
-              <video src={post.media_url} controls className="mt-2 w-full rounded" />
-            ) : (
-              <img src={post.media_url} className="mt-2 w-full rounded" />
-            )}
-
+      <div className="grid md:grid-cols-2 gap-4">
+        {drafts.map((draft) => (
+          <div
+            key={draft.id}
+            className="p-4 border rounded shadow-sm flex flex-col gap-2 bg-white dark:bg-gray-800 hover:shadow-lg transition-shadow"
+          >
+            <div className="h-48 w-full overflow-hidden rounded mb-2 flex items-center justify-center">
+              {draft.media_url.endsWith(".mp4") ? (
+                <video src={draft.media_url} className="h-full w-full object-cover" controls />
+              ) : (
+                <img src={draft.media_url} alt={draft.title} className="h-full w-full object-cover" />
+              )}
+            </div>
+            <h3 className="font-semibold text-lg">{draft.title}</h3>
+            <p className="text-gray-700 dark:text-gray-300">{draft.caption}</p>
             <button
-              onClick={() => handleDelete(post.id, post.media_url)}
-              className="text-red-600 mt-3"
+              onClick={() => handleDelete(draft)}
+              className="mt-auto bg-red-600 text-white py-1 rounded hover:bg-red-700"
             >
               Delete
             </button>
